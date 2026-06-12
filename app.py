@@ -109,23 +109,30 @@ from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 
 # ============================================================================
-# 1. CONFIGURATION  — edit these before running
+# 1. CONFIGURATION
+# ----------------------------------------------------------------------------
+# For Railway deployment: set these as Environment Variables in the Railway
+# dashboard (Settings → Variables). Never hardcode secrets in source code.
+#
+# Required variables:
+#   CLIENT_ID    — your FYERS app ID, e.g. "AB1234-100"
+#   SECRET_KEY   — your FYERS app secret
+#   REDIRECT_URI — your Railway public URL + /callback
+#                  e.g. "https://your-app.up.railway.app/callback"
+#   FLASK_SECRET — any long random string for Flask session signing
+#
+# Optional:
+#   PAPER_TRADING — "true" (default) or "false"
+#   LOTS_PER_LEG  — integer, default 1
 # ============================================================================
 
-CLIENT_ID    = "SXTH7FSD35-100"     # e.g. "AB1234-100"
-SECRET_KEY   = "LEOOR3FT7X"
-# ── Redirect URI ────────────────────────────────────────────────────────────
-# FYERS portal accepts https://127.0.0.1  (NOT localhost, NOT http://).
-# Register exactly this string in your FYERS API Dashboard:
-#   https://127.0.0.1/callback
-# After FYERS login, the browser lands on a "connection refused" page —
-# that is NORMAL. The app intercepts the URL via the paste-box.
-REDIRECT_URI = "https://127.0.0.1/callback"
-# ────────────────────────────────────────────────────────────────────────────
-FLASK_SECRET = "change-this-to-a-random-string"   # for session signing
+CLIENT_ID    = os.environ.get("CLIENT_ID",    "YOUR_CLIENT_ID-100")
+SECRET_KEY   = os.environ.get("SECRET_KEY",   "YOUR_SECRET_KEY")
+REDIRECT_URI = os.environ.get("REDIRECT_URI", "https://127.0.0.1/callback")
+FLASK_SECRET = os.environ.get("FLASK_SECRET", "change-this-to-a-random-string")
 TOKEN_FILE   = "fyers_access_token.json"
 
-PAPER_TRADING = False          # flip to False ONLY when you mean it
+PAPER_TRADING = os.environ.get("PAPER_TRADING", "true").lower() != "false"
 PRODUCT_TYPE  = "MARGIN"
 
 INSTRUMENTS = {
@@ -155,7 +162,7 @@ ST_RESOLUTION       = "15"
 ST_POLL_SECONDS     = 60
 MARGIN_POLL_SECONDS = 30
 STRATEGY_POLL_SECONDS = 5
-LOTS_PER_LEG        = 1
+LOTS_PER_LEG        = int(os.environ.get("LOTS_PER_LEG", "1"))
 MARGIN_URL          = "https://api-t1.fyers.in/api/v3/multiorder/margin"
 
 # ============================================================================
@@ -681,26 +688,26 @@ def strategy_worker(fyers, access_token: str,
 
 
 def socketio_emitter(stop_evt: threading.Event) -> None:
-    """Thread-5: serialises STATE and pushes it to all browser clients."""
-    def _serial(v):
-        # OrderedDict / nested structures -> plain dicts for JSON
-        if isinstance(v, OrderedDict):
-            return dict(v)
-        raise TypeError(type(v))
+    """
+    Thread-5: serialises STATE and pushes it to all browser clients.
 
+    MUST use app.app_context() around socketio.emit() when called from a
+    background thread — without it Flask-SocketIO raises NameError/RuntimeError
+    because there is no active application context outside a request.
+    """
     while not stop_evt.is_set():
         try:
             with STATE_LOCK:
-                ltps = dict(STATE["ltp"])
-                indices_snap = deepcopy(STATE["indices"])
+                ltps          = dict(STATE["ltp"])
+                indices_snap  = deepcopy(STATE["indices"])
                 positions_raw = list(STATE["positions"].values())
                 messages_snap = list(STATE["messages"][-20:])
-                ws_ok  = STATE["ws_connected"]
-                status = STATE["status"]
-                paper  = STATE["paper_trading"]
-                uname  = STATE["user_name"]
+                ws_ok         = STATE["ws_connected"]
+                status        = STATE["status"]
+                paper         = STATE["paper_trading"]
+                uname         = STATE["user_name"]
 
-            # build positions payload with live MTM
+            # ── build positions payload with live MTM ──────────────────────
             positions_out = []
             total_mtm = 0.0
             for p in positions_raw:
@@ -713,15 +720,12 @@ def socketio_emitter(stop_evt: threading.Event) -> None:
                     total_mtm += mtm
                 positions_out.append({**p, "ltp": ltp, "mtm": round(mtm, 2)})
 
-            # build scanner payload
+            # ── build scanner payload ──────────────────────────────────────
             scanner_out = {}
             for name, cfg in INSTRUMENTS.items():
-                d = indices_snap[name]
+                d    = indices_snap[name]
                 spot = ltps.get(cfg["spot_symbol"], d["spot"])
-                scanner_out[name] = {
-                    **d,
-                    "spot": spot,
-                }
+                scanner_out[name] = {**d, "spot": spot}
 
             payload = {
                 "status":    status,
@@ -735,9 +739,17 @@ def socketio_emitter(stop_evt: threading.Event) -> None:
                 "ts":        datetime.now().strftime("%H:%M:%S"),
                 "date":      datetime.now().strftime("%a %d %b %Y"),
             }
-            socketio.emit("state", payload)
-        except Exception:
-            pass
+
+            # ── emit inside an explicit app context ────────────────────────
+            # socketio.emit() from a background thread requires this;
+            # without it Flask raises "Working outside of application context"
+            with app.app_context():
+                socketio.emit("state", payload, namespace="/")
+
+        except Exception as exc:
+            # Log instead of silently swallowing — helps diagnose issues
+            log_msg(f"Emitter error: {exc}")
+
         time.sleep(0.25)
 
 
@@ -1006,6 +1018,7 @@ if __name__ == "__main__":
 
     print("=" * 60)
     print("  FYERS Strangle Web Terminal")
-    print("  Open http://localhost:5000 in your browser")
+    port = int(os.environ.get("PORT", 5000))
+    print(f"  Open http://localhost:{port} in your browser")
     print("=" * 60)
-    socketio.run(app, host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+    socketio.run(app, host="0.0.0.0", port=port, debug=False, use_reloader=False)

@@ -1,0 +1,27 @@
+# Token file — never commit this, it contains your access token
+fyers_access_token.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Logs written by FYERS SDK
+*.log
+logs/
