@@ -126,10 +126,10 @@ from fyers_apiv3.FyersWebsocket import data_ws
 #   LOTS_PER_LEG  — integer, default 1
 # ============================================================================
 
-CLIENT_ID    = os.environ.get("CLIENT_ID",    "YOUR_CLIENT_ID-100")
-SECRET_KEY   = os.environ.get("SECRET_KEY",   "YOUR_SECRET_KEY")
-REDIRECT_URI = os.environ.get("REDIRECT_URI", "https://127.0.0.1/callback")
-FLASK_SECRET = os.environ.get("FLASK_SECRET", "change-this-to-a-random-string")
+CLIENT_ID    = os.environ.get("CLIENT_ID",    "SXTH7FSD35-100")
+SECRET_KEY   = os.environ.get("SECRET_KEY",   "LEOOR3FT7X")
+REDIRECT_URI = os.environ.get("REDIRECT_URI", "https://web-production-57689.up.railway.app/callback")
+FLASK_SECRET = os.environ.get("FLASK_SECRET", "xK9mPqR8nL5vT3wZ")
 TOKEN_FILE   = "fyers_access_token.json"
 
 PAPER_TRADING = os.environ.get("PAPER_TRADING", "true").lower() != "false"
