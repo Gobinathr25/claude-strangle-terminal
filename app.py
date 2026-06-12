@@ -182,7 +182,21 @@ socketio = SocketIO(app, async_mode=_ASYNC_MODE, cors_allowed_origins="*")
 # ============================================================================
 # 3. GLOBAL STATE
 # ============================================================================
-
+@app.route("/debug/authurl")
+def debug_authurl():
+    sess = fyersModel.SessionModel(
+        client_id=CLIENT_ID,
+        secret_key=SECRET_KEY,
+        redirect_uri=REDIRECT_URI,
+        response_type="code",
+        grant_type="authorization_code",
+    )
+    url = sess.generate_authcode()
+    return jsonify({
+        "client_id":    CLIENT_ID,
+        "redirect_uri": REDIRECT_URI,
+        "auth_url":     url,
+    })
 STATE_LOCK = threading.RLock()
 
 STATE = {
