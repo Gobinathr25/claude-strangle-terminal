@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ST Strangle Terminal</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<style>
+  /* ── Reset & base ───────────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:         #0d0f14;
+    --bg2:        #141720;
+    --bg3:        #1c2030;
+    --border:     #2a2f45;
+    --cyan:       #00d4ff;
+    --cyan-dim:   #0088aa;
+    --green:      #00e676;
+    --red:        #ff1744;
+    --yellow:     #ffd600;
+    --magenta:    #e040fb;
+    --white:      #e8eaf0;
+    --dim:        #555c7a;
+    --font:       'Consolas', 'Courier New', monospace;
+    --radius:     6px;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--white);
+    font-family: var(--font);
+    font-size: 13px;
+    overflow: hidden;
+  }
+
+  /* ── Layout shell ───────────────────────────────────────────────────── */
+  #app {
+    display: grid;
+    grid-template-rows: 56px 1fr;
+    height: 100vh;
+  }
+
+  /* ── Header bar ─────────────────────────────────────────────────────── */
+  #header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 18px;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    gap: 16px;
+  }
+  #header .title {
+    color: var(--cyan);
+    font-size: 14px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    white-space: nowrap;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 10px;
+    border-radius: 99px;
+    font-size: 11px;
+    font-weight: bold;
+    border: 1px solid;
+  }
+  .badge.green  { color: var(--green);   border-color: var(--green);   background: #00e67614; }
+  .badge.red    { color: var(--red);     border-color: var(--red);     background: #ff174414; }
+  .badge.yellow { color: var(--yellow);  border-color: var(--yellow);  background: #ffd60014; }
+  .badge.cyan   { color: var(--cyan);    border-color: var(--cyan);    background: #00d4ff14; }
+  .badge.dim    { color: var(--dim);     border-color: var(--dim);     background: transparent; }
+
+  #header .right-group { display: flex; align-items: center; gap: 10px; }
+  #clock { color: var(--dim); font-size: 12px; }
+
+  /* ── Control buttons ─────────────────────────────────────────────────── */
+  .btn {
+    padding: 5px 16px;
+    border-radius: var(--radius);
+    border: 1px solid;
+    font-family: var(--font);
+    font-size: 12px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: opacity .15s;
+  }
+  .btn:hover { opacity: 0.8; }
+  .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .btn-stop    { color: var(--red);    border-color: var(--red);    background: #ff174412; }
+  .btn-start   { color: var(--green);  border-color: var(--green);  background: #00e67612; }
+  .btn-login   { color: var(--cyan);   border-color: var(--cyan);   background: #00d4ff12; font-size: 13px; padding: 7px 22px; }
+
+  /* ── Main body ───────────────────────────────────────────────────────── */
+  #body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto 1fr;
+    gap: 1px;
+    background: var(--border);
+    overflow: hidden;
+  }
+
+  /* ── Panels ──────────────────────────────────────────────────────────── */
+  .panel {
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .panel-header {
+    padding: 7px 14px;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    color: var(--dim);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .panel-header .ph-title { color: var(--cyan); }
+  .panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  /* Scanner spans full width */
+  #panel-scanner { grid-column: 1 / -1; }
+
+  /* ── Tables ──────────────────────────────────────────────────────────── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  thead th {
+    padding: 7px 12px;
+    text-align: right;
+    font-size: 11px;
+    font-weight: bold;
+    color: var(--cyan);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+    position: sticky;
+    top: 0;
+    background: var(--bg2);
+    z-index: 1;
+  }
+  thead th:first-child { text-align: left; }
+  tbody td {
+    padding: 6px 12px;
+    text-align: right;
+    border-bottom: 1px solid #1a1e2e;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  tbody td:first-child { text-align: left; }
+  tbody tr:hover td { background: var(--bg3); }
+  tbody tr.closed td { opacity: 0.38; text-decoration: line-through; }
+  tfoot td {
+    padding: 7px 12px;
+    text-align: right;
+    font-weight: bold;
+    font-size: 12px;
+    border-top: 1px solid var(--border);
+    background: var(--bg2);
+    position: sticky;
+    bottom: 0;
+  }
+
+  /* ── Log panel ───────────────────────────────────────────────────────── */
+  #log-body {
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .log-row {
+    display: flex;
+    gap: 8px;
+    font-size: 11px;
+    line-height: 1.5;
+    border-bottom: 1px solid #141720;
+    padding-bottom: 2px;
+  }
+  .log-ts   { color: var(--dim); flex-shrink: 0; }
+  .log-msg  { color: var(--white); }
+
+  /* ── Auth / Login overlay ────────────────────────────────────────────── */
+  #login-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(13,15,20,0.96);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    z-index: 100;
+  }
+  #login-overlay .lo-title {
+    color: var(--cyan);
+    font-size: 22px;
+    font-weight: bold;
+    letter-spacing: 2px;
+  }
+  #login-overlay .lo-sub {
+    color: var(--dim);
+    font-size: 13px;
+    text-align: center;
+    max-width: 380px;
+    line-height: 1.7;
+  }
+  #login-overlay .lo-error {
+    color: var(--red);
+    font-size: 12px;
+    background: #ff174412;
+    border: 1px solid var(--red);
+    border-radius: var(--radius);
+    padding: 8px 18px;
+    max-width: 380px;
+    text-align: center;
+  }
+  #login-overlay .lo-resume {
+    color: var(--green);
+    font-size: 12px;
+    background: #00e67612;
+    border: 1px solid var(--green);
+    border-radius: var(--radius);
+    padding: 8px 18px;
+  }
+  #login-overlay .lo-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    max-width: 500px;
+  }
+
+  /* ── Colours ─────────────────────────────────────────────────────────── */
+  .c-green   { color: var(--green); }
+  .c-red     { color: var(--red); }
+  .c-yellow  { color: var(--yellow); }
+  .c-cyan    { color: var(--cyan); }
+  .c-magenta { color: var(--magenta); }
+  .c-dim     { color: var(--dim); }
+  .c-white   { color: var(--white); }
+  .bold      { font-weight: bold; }
+
+  /* ── Sparkle animation on tick change ────────────────────────────────── */
+  @keyframes flash-green { 0%,100% { background: transparent; } 50% { background: #00e67622; } }
+  @keyframes flash-red   { 0%,100% { background: transparent; } 50% { background: #ff174422; } }
+  .tick-up   { animation: flash-green .4s ease; }
+  .tick-down { animation: flash-red   .4s ease; }
+
+  /* ── Responsive ──────────────────────────────────────────────────────── */
+  @media (max-width: 900px) {
+    #body { grid-template-columns: 1fr; }
+    html, body { font-size: 11px; overflow: auto; }
+    #app { overflow: auto; height: auto; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ════════════════════════════════ AUTH OVERLAY ═══════════════════════ -->
+<div id="login-overlay">
+  <div class="lo-title">⚡ ST STRANGLE TERMINAL</div>
+  <div class="lo-sub">
+    SuperTrend-Directed Rolling Hedged Strangle<br>
+    NIFTY 50 + SENSEX  |  FYERS API v3
+  </div>
+
+  {% if auth_error %}
+  <div class="lo-error">⚠ {{ auth_error }}</div>
+  {% endif %}
+
+  <!-- Step 1: Login button -->
+  <div id="step1" class="lo-step">
+    <button class="btn btn-login" onclick="openFyersLogin()">
+      🔑 &nbsp;Login with FYERS
+    </button>
+    <div class="lo-sub" style="font-size:11px; margin-top:8px;">
+      FYERS login opens in a <strong style="color:var(--cyan);">new tab</strong>.
+      After logging in, your browser will show a
+      <span style="color:var(--yellow);">"connection refused"</span> page — that is normal.<br>
+      Copy the full URL from that tab's address bar and paste it below.
+    </div>
+  </div>
+
+  <!-- Step 2: Paste box (shown after clicking Login) -->
+  <div id="step2" class="lo-step" style="display:none; width:100%; max-width:500px;">
+    <div class="lo-sub" style="color:var(--yellow); margin-bottom:10px;">
+      ✅ After FYERS login, copy the full URL from the address bar<br>
+      (it starts with <code style="color:var(--cyan);">https://127.0.0.1/callback?auth_code=...</code>)<br>
+      and paste it below:
+    </div>
+    <input
+      id="callback-url"
+      type="text"
+      placeholder="https://127.0.0.1/callback?auth_code=eyJ0...&s=ok"
+      style="width:100%; padding:10px 12px; background:var(--bg3);
+             border:1px solid var(--cyan); border-radius:var(--radius);
+             color:var(--white); font-family:var(--font); font-size:12px;
+             outline:none; margin-bottom:10px;"
+      onkeydown="if(event.key==='Enter') submitCallback()"
+    />
+    <div style="display:flex; gap:10px; justify-content:center;">
+      <button class="btn btn-login" onclick="submitCallback()">
+        ✅ &nbsp;Complete Login
+      </button>
+      <button class="btn" style="color:var(--dim);border-color:var(--dim);"
+              onclick="showStep1()">← Back</button>
+    </div>
+    <div id="cb-error" class="lo-error" style="display:none; margin-top:10px;"></div>
+    <div id="cb-loading" style="display:none; color:var(--cyan); margin-top:10px; font-size:12px;">
+      ⏳ Exchanging token with FYERS...
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════ APP SHELL ══════════════════════════ -->
+<div id="app" style="display:none;">
+
+  <!-- Header -->
+  <div id="header">
+    <span class="title">⚡ ST STRANGLE TERMINAL</span>
+
+    <div style="display:flex; align-items:center; gap:12px; flex:1; justify-content:center; flex-wrap:wrap;">
+      <span id="badge-ws"     class="badge dim">WS --</span>
+      <span id="badge-mode"   class="badge dim">MODE --</span>
+      <span id="badge-status" class="badge dim">--</span>
+      <span id="badge-user"   class="badge cyan" style="display:none;"></span>
+    </div>
+
+    <div class="right-group">
+      <span id="clock" class="c-dim">--:--:--</span>
+      <button id="btn-stop"  class="btn btn-stop"  onclick="sendControl('stop')"  style="display:none;">⏹ Stop</button>
+      <button id="btn-start" class="btn btn-start" onclick="sendControl('start')" style="display:none;">▶ Start</button>
+    </div>
+  </div>
+
+  <!-- Body grid -->
+  <div id="body">
+
+    <!-- Scanner (full width) -->
+    <div class="panel" id="panel-scanner">
+      <div class="panel-header">
+        <span class="ph-title">MARKET SCANNER — DUAL INDEX</span>
+        <span id="scanner-ts" class="c-dim" style="font-size:10px;"></span>
+      </div>
+      <div class="panel-body">
+        <table id="tbl-scanner">
+          <thead>
+            <tr>
+              <th style="text-align:left;">Index</th>
+              <th>Lot&nbsp;Size</th>
+              <th>Spot&nbsp;(LTP)</th>
+              <th>ST&nbsp;Upper</th>
+              <th>ST&nbsp;Lower</th>
+              <th>Trend</th>
+              <th>Margin Req (SPAN+Exp)</th>
+            </tr>
+          </thead>
+          <tbody id="scanner-body">
+            <tr><td colspan="7" class="c-dim" style="text-align:center;padding:18px;">Waiting for data…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Order book -->
+    <div class="panel" id="panel-orders">
+      <div class="panel-header">
+        <span class="ph-title">LIVE ORDER BOOK</span>
+        <span id="total-mtm-hdr" class="c-dim" style="font-size:11px;"></span>
+      </div>
+      <div class="panel-body">
+        <table id="tbl-orders">
+          <thead>
+            <tr>
+              <th style="text-align:left;">Time</th>
+              <th style="text-align:left;">Index</th>
+              <th style="text-align:left;">Symbol</th>
+              <th style="text-align:left;">Role</th>
+              <th>Qty</th>
+              <th>Entry</th>
+              <th>LTP</th>
+              <th>MTM</th>
+            </tr>
+          </thead>
+          <tbody id="orders-body">
+            <tr><td colspan="8" class="c-dim" style="text-align:center;padding:18px;">No positions yet</td></tr>
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colspan="7" style="text-align:right;" class="c-dim">TOTAL MTM</td>
+              <td id="total-mtm" class="c-white">₹ --</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>
+
+    <!-- Activity log -->
+    <div class="panel" id="panel-log">
+      <div class="panel-header">
+        <span class="ph-title">ACTIVITY LOG</span>
+      </div>
+      <div class="panel-body" id="log-body"></div>
+    </div>
+
+  </div><!-- /body -->
+</div><!-- /app -->
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// Client-side state
+// ═══════════════════════════════════════════════════════════════════════════
+const prevSpots = {};   // for tick colour flash
+let   prevLtps  = {};   // for order-book tick flash
+let   logSeen   = new Set();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SocketIO
+// ═══════════════════════════════════════════════════════════════════════════
+const socket = io({ transports: ["websocket", "polling"] });
+
+socket.on("connect",  () => console.log("SocketIO connected"));
+socket.on("disconnect", () => console.log("SocketIO disconnected"));
+
+socket.on("auth_ok", (data) => {
+  showApp(data.user);
+});
+
+socket.on("state", (d) => {
+  updateHeader(d);
+  updateScanner(d.scanner, d.ts);
+  updateOrders(d.positions, d.total_mtm);
+  updateLog(d.messages);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Overlay / app visibility
+// ═══════════════════════════════════════════════════════════════════════════
+function showApp(user) {
+  document.getElementById("login-overlay").style.display = "none";
+  document.getElementById("app").style.display           = "grid";
+  if (user) {
+    const b = document.getElementById("badge-user");
+    b.textContent = "👤 " + user;
+    b.style.display = "inline-flex";
+  }
+}
+
+// If page loaded after successful callback (server sets a flag via Jinja)
+// We detect auth state via first SocketIO "auth_ok" event, but also check
+// immediately via REST so a hard-refresh doesn't flash the login screen.
+fetch("/api/state").then(r => r.json()).then(d => {
+  if (d.authenticated) showApp("");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Header
+// ═══════════════════════════════════════════════════════════════════════════
+function updateHeader(d) {
+  // clock (keep our own for smooth 1s tick between server pushes)
+  document.getElementById("clock").textContent = d.date + "  " + d.ts;
+
+  // WS badge
+  const wsB = document.getElementById("badge-ws");
+  wsB.textContent = d.ws ? "🟢 WS LIVE" : "🔴 WS DOWN";
+  wsB.className   = "badge " + (d.ws ? "green" : "red");
+
+  // Mode badge
+  const modeB = document.getElementById("badge-mode");
+  modeB.textContent = d.paper ? "📋 PAPER" : "💰 REAL MONEY";
+  modeB.className   = "badge " + (d.paper ? "yellow" : "red");
+
+  // Status badge
+  const stB = document.getElementById("badge-status");
+  const statusMap = {
+    RUNNING:      ["green",  "▶ RUNNING"],
+    STOPPED:      ["red",    "⏹ STOPPED"],
+    BOOTING:      ["yellow", "⚙ BOOTING"],
+    WAITING_AUTH: ["dim",    "🔒 WAITING AUTH"],
+  };
+  const [cls, lbl] = statusMap[d.status] || ["dim", d.status];
+  stB.textContent = lbl;
+  stB.className   = "badge " + cls;
+
+  // Control buttons
+  document.getElementById("btn-stop").style.display  = d.status === "RUNNING" ? "" : "none";
+  document.getElementById("btn-start").style.display = d.status === "STOPPED" ? "" : "none";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Scanner table
+// ═══════════════════════════════════════════════════════════════════════════
+const INSTRUMENTS = ["NIFTY", "SENSEX"];
+
+function fmt(v, dec=2) {
+  if (v === null || v === undefined) return '<span class="c-dim">--</span>';
+  return Number(v).toLocaleString("en-IN", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+}
+
+function updateScanner(scanner, ts) {
+  document.getElementById("scanner-ts").textContent = "updated " + ts;
+  const tbody = document.getElementById("scanner-body");
+  let html = "";
+
+  INSTRUMENTS.forEach(name => {
+    const d = scanner[name] || {};
+    const spot    = d.spot;
+    const upper   = d.st_upper;
+    const lower   = d.st_lower;
+    const trend   = d.st_trend;
+    const margin  = d.margin;
+    const lot     = d.lot_size;
+
+    // spot colour
+    let spotCls = "c-white";
+    if (spot !== null && upper !== null && lower !== null) {
+      if (spot > upper) spotCls = "c-green bold";
+      else if (spot < lower) spotCls = "c-red bold";
+    }
+
+    // flash
+    let flashCls = "";
+    const prev = prevSpots[name];
+    if (prev !== undefined && spot !== null) {
+      if (spot > prev) flashCls = " tick-up";
+      else if (spot < prev) flashCls = " tick-down";
+    }
+    if (spot !== null) prevSpots[name] = spot;
+
+    // trend
+    let trendHtml = '<span class="c-dim">--</span>';
+    if (trend === 1)  trendHtml = '<span class="c-green bold">▲ UP</span>';
+    if (trend === -1) trendHtml = '<span class="c-red bold">▼ DOWN</span>';
+
+    // margin
+    const marginHtml = margin !== null
+      ? `<span class="c-yellow">₹ ${fmt(margin, 0)}</span>`
+      : '<span class="c-dim">--</span>';
+
+    html += `
+      <tr id="scanner-${name}">
+        <td class="bold c-white">${name}</td>
+        <td>${lot !== null ? lot : '<span class="c-dim">--</span>'}</td>
+        <td class="${spotCls}${flashCls}">${fmt(spot)}</td>
+        <td class="c-green">${fmt(upper)}</td>
+        <td class="c-red">${fmt(lower)}</td>
+        <td>${trendHtml}</td>
+        <td>${marginHtml}</td>
+      </tr>`;
+  });
+
+  tbody.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Order book
+// ═══════════════════════════════════════════════════════════════════════════
+function updateOrders(positions, totalMtm) {
+  const tbody    = document.getElementById("orders-body");
+  const totalEl  = document.getElementById("total-mtm");
+  const totalHdr = document.getElementById("total-mtm-hdr");
+
+  if (!positions.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="c-dim" style="text-align:center;padding:18px;">No positions yet</td></tr>';
+    totalEl.innerHTML = '<span class="c-dim">₹ --</span>';
+    return;
+  }
+
+  let html = "";
+  positions.forEach(p => {
+    const ltp = p.ltp;
+    const mtm = p.mtm;
+
+    // flash on LTP change
+    let flashCls = "";
+    const prevLtp = prevLtps[p.symbol];
+    if (prevLtp !== undefined) {
+      if (ltp > prevLtp) flashCls = " tick-up";
+      else if (ltp < prevLtp) flashCls = " tick-down";
+    }
+    prevLtps[p.symbol] = ltp;
+
+    const sideHtml = p.side < 0
+      ? '<span class="c-red">S</span>'
+      : '<span class="c-green">B</span>';
+    const mtmCls  = mtm >= 0 ? "c-green" : "c-red";
+    const rowCls  = p.closed ? "closed" : "";
+
+    html += `
+      <tr class="${rowCls}">
+        <td>${p.time}</td>
+        <td class="c-cyan">${p.index}</td>
+        <td style="text-align:left; font-size:11px;">${p.symbol}</td>
+        <td style="text-align:left;">${sideHtml} <span class="c-dim">${p.role}</span></td>
+        <td>${p.qty}</td>
+        <td>${fmt(p.entry)}</td>
+        <td class="${flashCls}">${fmt(ltp)}</td>
+        <td class="${mtmCls} bold">${fmt(mtm)}</td>
+      </tr>`;
+  });
+
+  tbody.innerHTML = html;
+
+  // total MTM footer
+  const tCls = totalMtm >= 0 ? "c-green" : "c-red";
+  totalEl.innerHTML = `<span class="${tCls} bold">₹ ${fmt(totalMtm)}</span>`;
+  totalHdr.innerHTML = `Total MTM: <span class="${tCls} bold">₹ ${fmt(totalMtm)}</span>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Activity log
+// ═══════════════════════════════════════════════════════════════════════════
+function updateLog(messages) {
+  const body = document.getElementById("log-body");
+  let changed = false;
+
+  messages.slice().reverse().forEach(m => {
+    const key = m.t + "|" + m.msg;
+    if (!logSeen.has(key)) {
+      logSeen.add(key);
+      const row = document.createElement("div");
+      row.className = "log-row";
+      row.innerHTML = `<span class="log-ts">${m.t}</span><span class="log-msg">${escHtml(m.msg)}</span>`;
+      body.prepend(row);
+      changed = true;
+    }
+  });
+
+  // trim to 50 visible rows
+  while (body.children.length > 50) body.removeChild(body.lastChild);
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Control
+// ═══════════════════════════════════════════════════════════════════════════
+function sendControl(action) {
+  fetch("/api/control", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action })
+  })
+  .then(r => r.json())
+  .then(d => { if (!d.ok) alert("Error: " + d.error); })
+  .catch(e => alert("Network error: " + e));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Auth paste-box flow
+// ═══════════════════════════════════════════════════════════════════════════
+
+function openFyersLogin() {
+  // Fetch the auth URL from the server (avoids exposing CLIENT_ID in JS),
+  // then open it in a NEW TAB so this app tab stays alive and waiting.
+  fetch("/api/login_url")
+    .then(r => r.json())
+    .then(d => {
+      if (!d.url) { showCbError("Could not get login URL from server."); return; }
+      // Open FYERS OAuth in a new tab — this tab keeps the paste-box ready
+      window.open(d.url, "_blank", "noopener");
+      // Immediately show the paste-box so the user knows what to do next
+      showPasteBox();
+    })
+    .catch(e => showCbError("Server error: " + e));
+}
+
+function showPasteBox() {
+  document.getElementById("step1").style.display = "none";
+  document.getElementById("step2").style.display = "flex";
+  document.getElementById("callback-url").focus();
+}
+
+function showStep1() {
+  document.getElementById("step2").style.display = "none";
+  document.getElementById("step1").style.display = "flex";
+  document.getElementById("cb-error").style.display = "none";
+}
+
+function submitCallback() {
+  const url = document.getElementById("callback-url").value.trim();
+  if (!url) {
+    showCbError("Please paste the full URL from your browser address bar.");
+    return;
+  }
+  // Basic sanity check
+  if (!url.includes("auth_code") && !url.includes("code=")) {
+    showCbError("URL does not contain auth_code. Make sure you copied the entire address bar URL after FYERS login.");
+    return;
+  }
+
+  document.getElementById("cb-error").style.display   = "none";
+  document.getElementById("cb-loading").style.display = "block";
+
+  fetch("/manual_callback", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ url }),
+  })
+  .then(r => r.json())
+  .then(d => {
+    document.getElementById("cb-loading").style.display = "none";
+    if (d.ok) {
+      // Auth complete — hide overlay and show dashboard
+      document.getElementById("login-overlay").style.display = "none";
+      document.getElementById("app").style.display = "grid";
+    } else {
+      showCbError(d.error || "Unknown error");
+    }
+  })
+  .catch(e => {
+    document.getElementById("cb-loading").style.display = "none";
+    showCbError("Network error: " + e);
+  });
+}
+
+function showCbError(msg) {
+  const el = document.getElementById("cb-error");
+  el.textContent = "⚠ " + msg;
+  el.style.display = "block";
+}
+
+setInterval(() => {
+  const el = document.getElementById("clock");
+  if (el && !el.textContent.startsWith("--")) {
+    const now = new Date();
+    const ts  = now.toLocaleTimeString("en-GB");
+    const dt  = now.toLocaleDateString("en-GB", { weekday:"short", day:"2-digit", month:"short", year:"numeric" });
+    el.textContent = dt + "  " + ts;
+  }
+}, 1000);
+</script>
+</body>
+</html>

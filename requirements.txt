@@ -1,0 +1,16 @@
+# Core web framework
+flask>=3.0
+flask-socketio>=5.3
+
+# WSGI async server — pick ONE (gevent preferred, eventlet is fallback)
+# Install with:  pip install gevent gevent-websocket
+gevent>=24.0
+gevent-websocket>=0.10
+
+# Fallback if gevent causes issues:
+# pip install eventlet
+
+# FYERS SDK + strategy dependencies
+fyers-apiv3>=3.1
+pandas>=2.0
+requests>=2.31
