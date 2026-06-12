@@ -122,14 +122,17 @@ from fyers_apiv3.FyersWebsocket import data_ws
 #   FLASK_SECRET — any long random string for Flask session signing
 #
 # Optional:
-#   PAPER_TRADING — "true" (default) or "false"
-#   LOTS_PER_LEG  — integer, default 1
+#   PAPER_TRADING  — "true" (default) or "false"
+#   LOTS_PER_LEG   — base lots per leg, default 1
+#   LOT_MULTIPLIER — multiplies LOTS_PER_LEG; total qty = lot_size × LOTS_PER_LEG × LOT_MULTIPLIER
+#                    e.g. LOTS_PER_LEG=1, LOT_MULTIPLIER=3 → 3 lots per leg
+#   TZ             — MUST be "Asia/Kolkata" on Railway (server runs UTC)
 # ============================================================================
 
 CLIENT_ID    = os.environ.get("CLIENT_ID",    "SXTH7FSD35-100")
 SECRET_KEY   = os.environ.get("SECRET_KEY",   "LEOOR3FT7X")
 REDIRECT_URI = os.environ.get("REDIRECT_URI", "https://web-production-57689.up.railway.app/callback")
-FLASK_SECRET = os.environ.get("FLASK_SECRET", "xK9mPqR8nL5vT3wZ")
+FLASK_SECRET = os.environ.get("FLASK_SECRET", "xK9mP2qR8nL5vT3w")
 TOKEN_FILE   = "fyers_access_token.json"
 
 PAPER_TRADING = os.environ.get("PAPER_TRADING", "true").lower() != "false"
@@ -163,7 +166,16 @@ ST_POLL_SECONDS     = 60
 MARGIN_POLL_SECONDS = 30
 STRATEGY_POLL_SECONDS = 5
 LOTS_PER_LEG        = int(os.environ.get("LOTS_PER_LEG", "1"))
+LOT_MULTIPLIER      = int(os.environ.get("LOT_MULTIPLIER", "1"))  # scale all legs
 MARGIN_URL          = "https://api-t1.fyers.in/api/v3/multiorder/margin"
+
+# ── Market session timing (IST, 24-hr) ──────────────────────────────────────
+# All times are checked against datetime.now() which must be IST on the server.
+# Railway servers run UTC — set TZ=Asia/Kolkata in Railway Variables.
+MARKET_OPEN   = (9,  15)   # 09:15 — earliest entry allowed
+NO_NEW_ROLLS  = (14, 45)   # 14:45 — stop opening new rolls after this
+SQUARE_OFF_AT = (14, 55)   # 14:55 — hard square-off of all open positions
+MARKET_CLOSE  = (15, 35)   # 15:35 — strategy fully idle after this
 
 # ============================================================================
 # 2. FLASK + SOCKETIO SETUP
@@ -182,29 +194,17 @@ socketio = SocketIO(app, async_mode=_ASYNC_MODE, cors_allowed_origins="*")
 # ============================================================================
 # 3. GLOBAL STATE
 # ============================================================================
-@app.route("/debug/authurl")
-def debug_authurl():
-    sess = fyersModel.SessionModel(
-        client_id=CLIENT_ID,
-        secret_key=SECRET_KEY,
-        redirect_uri=REDIRECT_URI,
-        response_type="code",
-        grant_type="authorization_code",
-    )
-    url = sess.generate_authcode()
-    return jsonify({
-        "client_id":    CLIENT_ID,
-        "redirect_uri": REDIRECT_URI,
-        "auth_url":     url,
-    })
+
 STATE_LOCK = threading.RLock()
 
 STATE = {
-    "status":       "WAITING_AUTH",   # WAITING_AUTH | BOOTING | RUNNING | STOPPED
-    "ws_connected": False,
+    "status":        "WAITING_AUTH",  # WAITING_AUTH | BOOTING | RUNNING | STOPPED
+    "ws_connected":  False,
     "authenticated": False,
-    "user_name":    "",
-    "ltp":          {},
+    "user_name":     "",
+    "market_phase":  "CLOSED",        # PRE_OPEN | OPEN | NO_ROLLS | SQUARING_OFF | CLOSED
+    "squaredoff":    False,           # True once the 14:55 square-off has run today
+    "ltp":           {},
     "indices": {
         name: {
             "lot_size":  None,
@@ -431,7 +431,7 @@ def build_condor_legs(fyers, index_name: str) -> list:
     hpe_sym, hpe_k, hpe_ltp = pick_leg(rows, "PE", spot - off - hedge)
 
     lot = STATE["indices"][index_name]["lot_size"] or 0
-    qty = lot * LOTS_PER_LEG
+    qty = lot * LOTS_PER_LEG * LOT_MULTIPLIER   # e.g. lot=75, LOTS=1, MULT=3 → qty=225
     return [
         {"index": index_name, "symbol": hce_sym, "strike": hce_k,
          "side":  1, "qty": qty, "ref_ltp": hce_ltp, "role": "HEDGE-CE"},
@@ -639,12 +639,108 @@ def margin_worker(access_token: str, stop_evt: threading.Event) -> None:
         stop_evt.wait(MARGIN_POLL_SECONDS)
 
 
+def get_market_phase() -> str:
+    """
+    Returns the current market phase based on IST time.
+    Assumes the server clock is IST (set TZ=Asia/Kolkata on Railway).
+
+    PRE_OPEN    — before 09:15, strategy waits
+    OPEN        — 09:15–14:44, normal entry + rolling allowed
+    NO_ROLLS    — 14:45–14:54, no new entries or rolls; existing positions held
+    SQUARING_OFF— 14:55–15:34, auto square-off fires once then phase holds
+    CLOSED      — 15:35 onwards, fully idle
+    """
+    now  = datetime.now()
+    hhmm = (now.hour, now.minute)
+
+    if hhmm < MARKET_OPEN:
+        return "PRE_OPEN"
+    if hhmm < NO_NEW_ROLLS:
+        return "OPEN"
+    if hhmm < SQUARE_OFF_AT:
+        return "NO_ROLLS"
+    if hhmm < MARKET_CLOSE:
+        return "SQUARING_OFF"
+    return "CLOSED"
+
+
+def squareoff_all(fyers, reason: str = "EOD") -> None:
+    """Close every open position across all indices."""
+    with STATE_LOCK:
+        open_keys = [
+            (k, dict(p)) for k, p in STATE["positions"].items()
+            if not p["closed"]
+        ]
+    if not open_keys:
+        log_msg(f"{reason}: no open positions to close")
+        return
+    log_msg(f"{reason}: squaring off {len(open_keys)} open leg(s)…")
+    for key, pos in open_keys:
+        try:
+            if not STATE["paper_trading"]:
+                fyers.place_order(data={
+                    "symbol":       pos["symbol"],
+                    "qty":          pos["qty"],
+                    "type":         2,
+                    "side":         -pos["side"],
+                    "productType":  PRODUCT_TYPE,
+                    "limitPrice":   0,
+                    "stopPrice":    0,
+                    "validity":     "DAY",
+                    "disclosedQty": 0,
+                    "offlineOrder": False,
+                })
+            with STATE_LOCK:
+                STATE["positions"][key]["closed"] = True
+            log_msg(f"SQ-OFF {pos['role']} {pos['symbol']}")
+        except Exception as exc:
+            log_msg(f"SQ-OFF FAILED {pos['symbol']}: {exc}")
+    with STATE_LOCK:
+        STATE["squaredoff"] = True
+
+
 def strategy_worker(fyers, access_token: str,
                     stream: TickStream, stop_evt: threading.Event) -> None:
     breached = {name: None  for name in INSTRUMENTS}
     entered  = {name: False for name in INSTRUMENTS}
 
     while not stop_evt.is_set():
+
+        # ── Update market phase in STATE so UI can display it ──────────────
+        phase = get_market_phase()
+        with STATE_LOCK:
+            STATE["market_phase"] = phase
+
+        # ── PRE_OPEN: wait silently until market opens ─────────────────────
+        if phase == "PRE_OPEN":
+            stop_evt.wait(15)
+            continue
+
+        # ── CLOSED: nothing to do after 15:35 ─────────────────────────────
+        if phase == "CLOSED":
+            stop_evt.wait(60)
+            continue
+
+        # ── SQUARING_OFF: fire the square-off exactly once, then hold ──────
+        if phase == "SQUARING_OFF":
+            with STATE_LOCK:
+                already_done = STATE["squaredoff"]
+            if not already_done:
+                log_msg("⏰ 14:55 reached — auto square-off all positions")
+                squareoff_all(fyers, reason="14:55 EOD")
+                # Reset entered flags so a fresh entry can happen next day
+                entered  = {name: False for name in INSTRUMENTS}
+                breached = {name: None  for name in INSTRUMENTS}
+            stop_evt.wait(30)
+            continue
+
+        # ── NO_ROLLS (14:45–14:54): hold positions, no new entry/rolls ─────
+        if phase == "NO_ROLLS":
+            log_msg("⏸ 14:45 no-roll window — holding positions")
+            stop_evt.wait(30)
+            continue
+
+        # ── OPEN (09:15–14:44): normal strategy logic ──────────────────────
         for name, cfg in INSTRUMENTS.items():
             try:
                 with STATE_LOCK:
@@ -655,6 +751,7 @@ def strategy_worker(fyers, access_token: str,
                 with STATE_LOCK:
                     STATE["indices"][name]["spot"] = spot
 
+                # ── Initial 4-leg entry ────────────────────────────────────
                 if not entered[name]:
                     legs = build_condor_legs(fyers, name)
                     stream.subscribe([l["symbol"] for l in legs])
@@ -662,7 +759,8 @@ def strategy_worker(fyers, access_token: str,
                         m = basket_margin(access_token, legs)
                         with STATE_LOCK:
                             STATE["indices"][name]["margin"] = m
-                        log_msg(f"{name} basket margin: ₹{m:,.0f}")
+                        log_msg(f"{name} basket margin: ₹{m:,.0f} "
+                                f"| qty/leg: {legs[0]['qty']}")
                     except Exception as exc:
                         log_msg(f"{name} margin check: {exc}")
                     time.sleep(1.5)
@@ -671,6 +769,7 @@ def strategy_worker(fyers, access_token: str,
                     entered[name] = True
                     continue
 
+                # ── Rolling logic ──────────────────────────────────────────
                 if spot > idx["st_upper"] and breached[name] != "UP":
                     breached[name] = "UP"
                     log_msg(f"{name} ▲ breached ST UPPER → rolling PUT up")
@@ -694,10 +793,11 @@ def strategy_worker(fyers, access_token: str,
                         execute_leg(fyers, leg)
 
                 elif idx["st_lower"] <= spot <= idx["st_upper"]:
-                    breached[name] = None
+                    breached[name] = None     # re-arm trigger
 
             except Exception as exc:
                 log_msg(f"Strategy {name}: {exc}")
+
         stop_evt.wait(STRATEGY_POLL_SECONDS)
 
 
@@ -720,6 +820,7 @@ def socketio_emitter(stop_evt: threading.Event) -> None:
                 status        = STATE["status"]
                 paper         = STATE["paper_trading"]
                 uname         = STATE["user_name"]
+                market_phase  = STATE["market_phase"]
 
             # ── build positions payload with live MTM ──────────────────────
             positions_out = []
@@ -742,16 +843,19 @@ def socketio_emitter(stop_evt: threading.Event) -> None:
                 scanner_out[name] = {**d, "spot": spot}
 
             payload = {
-                "status":    status,
-                "ws":        ws_ok,
-                "paper":     paper,
-                "user":      uname,
-                "scanner":   scanner_out,
-                "positions": positions_out,
-                "total_mtm": round(total_mtm, 2),
-                "messages":  messages_snap,
-                "ts":        datetime.now().strftime("%H:%M:%S"),
-                "date":      datetime.now().strftime("%a %d %b %Y"),
+                "status":         status,
+                "ws":             ws_ok,
+                "paper":          paper,
+                "user":           uname,
+                "market_phase":   market_phase,
+                "lot_multiplier": LOT_MULTIPLIER,
+                "lots_per_leg":   LOTS_PER_LEG,
+                "scanner":        scanner_out,
+                "positions":      positions_out,
+                "total_mtm":      round(total_mtm, 2),
+                "messages":       messages_snap,
+                "ts":             datetime.now().strftime("%H:%M:%S"),
+                "date":           datetime.now().strftime("%a %d %b %Y"),
             }
 
             # ── emit inside an explicit app context ────────────────────────
@@ -778,7 +882,8 @@ def boot_workers(fyers, access_token: str) -> None:
     _access_token = access_token
 
     with STATE_LOCK:
-        STATE["status"] = "BOOTING"
+        STATE["status"]     = "BOOTING"
+        STATE["squaredoff"] = False   # reset each boot for new trading day
 
     # lot sizes
     for name, cfg in INSTRUMENTS.items():

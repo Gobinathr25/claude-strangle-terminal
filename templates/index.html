@@ -336,10 +336,12 @@
     <span class="title">⚡ ST STRANGLE TERMINAL</span>
 
     <div style="display:flex; align-items:center; gap:12px; flex:1; justify-content:center; flex-wrap:wrap;">
-      <span id="badge-ws"     class="badge dim">WS --</span>
-      <span id="badge-mode"   class="badge dim">MODE --</span>
-      <span id="badge-status" class="badge dim">--</span>
-      <span id="badge-user"   class="badge cyan" style="display:none;"></span>
+      <span id="badge-ws"      class="badge dim">WS --</span>
+      <span id="badge-mode"    class="badge dim">MODE --</span>
+      <span id="badge-phase"   class="badge dim">MARKET --</span>
+      <span id="badge-lots"    class="badge dim">LOTS --</span>
+      <span id="badge-status"  class="badge dim">--</span>
+      <span id="badge-user"    class="badge cyan" style="display:none;"></span>
     </div>
 
     <div class="right-group">
@@ -485,6 +487,26 @@ function updateHeader(d) {
   const modeB = document.getElementById("badge-mode");
   modeB.textContent = d.paper ? "📋 PAPER" : "💰 REAL MONEY";
   modeB.className   = "badge " + (d.paper ? "yellow" : "red");
+
+  // Market phase badge
+  const phaseB = document.getElementById("badge-phase");
+  const phaseMap = {
+    PRE_OPEN:     ["cyan",   "🕐 PRE-OPEN"],
+    OPEN:         ["green",  "🟢 MARKET OPEN"],
+    NO_ROLLS:     ["yellow", "⏸ NO NEW ROLLS"],
+    SQUARING_OFF: ["red",    "⚠ SQUARING OFF"],
+    CLOSED:       ["dim",    "🔒 MARKET CLOSED"],
+  };
+  const [pCls, pLbl] = phaseMap[d.market_phase] || ["dim", d.market_phase || "--"];
+  phaseB.textContent = pLbl;
+  phaseB.className   = "badge " + pCls;
+
+  // Lot multiplier badge
+  const lotsB = document.getElementById("badge-lots");
+  if (d.lot_multiplier !== undefined) {
+    lotsB.textContent = `📦 ${d.lots_per_leg} lot × ${d.lot_multiplier}x`;
+    lotsB.className   = "badge cyan";
+  }
 
   // Status badge
   const stB = document.getElementById("badge-status");
