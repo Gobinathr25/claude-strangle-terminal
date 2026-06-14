@@ -200,10 +200,10 @@ from fyers_apiv3.FyersWebsocket import data_ws
 #   TZ             — MUST be "Asia/Kolkata" on Railway (server runs UTC)
 # ============================================================================
 
-CLIENT_ID    = os.environ.get("CLIENT_ID",    "YOUR_CLIENT_ID-100")
-SECRET_KEY   = os.environ.get("SECRET_KEY",   "YOUR_SECRET_KEY")
-REDIRECT_URI = os.environ.get("REDIRECT_URI", "https://127.0.0.1/callback")
-FLASK_SECRET = os.environ.get("FLASK_SECRET", "change-this-to-a-random-string")
+CLIENT_ID    = os.environ.get("CLIENT_ID",    "SXTH7FSD35-100")
+SECRET_KEY   = os.environ.get("SECRET_KEY",   "LEOOR3FT7X")
+REDIRECT_URI = os.environ.get("REDIRECT_URI", "https://web-production-57689.up.railway.app/callback")
+FLASK_SECRET = os.environ.get("FLASK_SECRET", "xK9mP2qR8nL5vT3w")
 TOKEN_FILE   = "fyers_access_token.json"
 
 PAPER_TRADING = os.environ.get("PAPER_TRADING", "true").lower() != "false"
@@ -288,6 +288,37 @@ NO_NEW_ROLLS  = (14, 45)   # 14:45 — stop opening new rolls after this
 SQUARE_OFF_AT = (14, 55)   # 14:55 — hard square-off of all open positions
 MARKET_CLOSE  = (15, 35)   # 15:35 — strategy fully idle after this
 
+# ── Gap classification (% of previous close) ─────────────────────────────────
+# Gap = (today's open − yesterday's close) / yesterday's close × 100
+# Thresholds in PERCENT (same for both indices since it's relative):
+GAP_FLAT_PCT     = 0.15    # |gap| < 0.15%  → FLAT
+GAP_BIG_PCT      = 0.50    # |gap| > 0.50%  → BIG gap
+
+# Symmetric offset multiplier applied to the weekday base offset.
+# Calm flat open → tighten (more premium). Big gap → widen (avoid breach).
+GAP_MULTIPLIER = {
+    "BIG_GAP_DOWN": 1.45,   # panic open, widest range — most caution
+    "GAP_DOWN":     1.05,
+    "FLAT":         0.83,   # calmest — tighten strikes, collect more premium
+    "GAP_UP":       1.00,
+    "BIG_GAP_UP":   1.33,
+}
+
+# Asymmetric split on directional gap days.
+# On a gap-up day price tends to keep rising → CALL side threatened:
+#   push CE out (×1.15 safer), pull PE in (×0.90 more premium).
+# On a gap-down day → mirror it.  FLAT = symmetric.
+GAP_ASYMMETRY = {
+    "BIG_GAP_DOWN": {"ce": 0.90, "pe": 1.15},
+    "GAP_DOWN":     {"ce": 0.90, "pe": 1.15},
+    "FLAT":         {"ce": 1.00, "pe": 1.00},
+    "GAP_UP":       {"ce": 1.15, "pe": 0.90},
+    "BIG_GAP_UP":   {"ce": 1.15, "pe": 0.90},
+}
+
+# Toggle the asymmetric split (symmetric multiplier always applies)
+USE_ASYMMETRIC_GAP = os.environ.get("USE_ASYMMETRIC_GAP", "true").lower() != "false"
+
 # ============================================================================
 # 2. FLASK + SOCKETIO SETUP
 # ============================================================================
@@ -318,15 +349,21 @@ STATE = {
     "ltp":           {},
     "indices": {
         name: {
-            "lot_size":      None,
-            "spot":          None,
-            "st_upper":      None,
-            "st_lower":      None,
-            "st_trend":      None,
-            "margin":        None,
-            "expiry_ts":     None,
-            "active_offset": None,   # today's per-day short strike offset
-            "active_hedge":  None,   # today's per-day hedge width
+            "lot_size":         None,
+            "spot":             None,
+            "st_upper":         None,
+            "st_lower":         None,
+            "st_trend":         None,
+            "margin":           None,
+            "expiry_ts":        None,
+            "active_offset":    None,   # wider of CE/PE (for display)
+            "active_ce_offset": None,   # short call offset
+            "active_pe_offset": None,   # short put offset
+            "active_hedge":     None,
+            "gap_pct":          None,   # today's opening gap %
+            "gap_type":         None,   # FLAT / GAP_UP / BIG_GAP_DOWN ...
+            "prev_close":       None,
+            "today_open":       None,
         } for name in INSTRUMENTS
     },
     "positions": OrderedDict(),
@@ -516,6 +553,81 @@ def pick_leg(chain_rows: list, option_type: str, target_strike: float):
     return best["symbol"], best["strike_price"], best.get("ltp", 0.0)
 
 
+def get_gap_info(fyers, index_name: str, spot: float) -> dict:
+    """
+    Computes today's opening gap vs yesterday's close.
+    Returns dict: {prev_close, today_open, gap_pct, gap_type, multiplier}
+
+    Uses daily-resolution history to get prev close + today's open.
+    Falls back gracefully to FLAT (no adjustment) if data unavailable —
+    a missing-data day should never widen or tighten blindly.
+    """
+    cfg = INSTRUMENTS[index_name]
+    result = {
+        "prev_close":  None,
+        "today_open":  None,
+        "gap_pct":     0.0,
+        "gap_type":    "FLAT",
+        "multiplier":  1.0,
+    }
+    try:
+        rng_to   = now_ist()
+        rng_from = rng_to - timedelta(days=8)   # enough for prev trading day
+        resp = fyers.history({
+            "symbol":      cfg["spot_symbol"],
+            "resolution":  "D",                 # daily candles
+            "date_format": "1",
+            "range_from":  rng_from.strftime("%Y-%m-%d"),
+            "range_to":    rng_to.strftime("%Y-%m-%d"),
+            "cont_flag":   "1",
+        })
+        candles = resp.get("candles") or []
+        if resp.get("s") != "ok" or len(candles) < 2:
+            log_msg(f"{index_name} gap: insufficient daily data, using FLAT")
+            return result
+
+        # candles: [ts, open, high, low, close, volume], oldest → newest
+        today_candle = candles[-1]
+        prev_candle  = candles[-2]
+        today_open   = float(today_candle[1])
+        prev_close   = float(prev_candle[4])
+
+        if prev_close <= 0:
+            return result
+
+        gap_pct = (today_open - prev_close) / prev_close * 100.0
+        gap_type = classify_gap(gap_pct)
+
+        result.update({
+            "prev_close": round(prev_close, 2),
+            "today_open": round(today_open, 2),
+            "gap_pct":    round(gap_pct, 3),
+            "gap_type":   gap_type,
+            "multiplier": GAP_MULTIPLIER[gap_type],
+        })
+    except Exception as exc:
+        log_msg(f"{index_name} gap calc failed (using FLAT): {exc}")
+    return result
+
+
+def classify_gap(gap_pct: float) -> str:
+    """Map a gap percentage to one of five categories."""
+    if gap_pct <= -GAP_BIG_PCT:
+        return "BIG_GAP_DOWN"
+    if gap_pct <= -GAP_FLAT_PCT:
+        return "GAP_DOWN"
+    if gap_pct < GAP_FLAT_PCT:
+        return "FLAT"
+    if gap_pct < GAP_BIG_PCT:
+        return "GAP_UP"
+    return "BIG_GAP_UP"
+
+
+def round_to_step(value: float, step: int) -> int:
+    """Round an offset to the nearest tradable strike step."""
+    return int(round(value / step) * step)
+
+
 def build_condor_legs(fyers, index_name: str) -> list:
     cfg = INSTRUMENTS[index_name]
     data = get_option_chain(fyers, cfg["spot_symbol"])
@@ -537,40 +649,68 @@ def build_condor_legs(fyers, index_name: str) -> list:
         q = fyers.quotes({"symbols": cfg["spot_symbol"]})
         spot = q["d"][0]["v"]["lp"]
 
-    # ── Resolve per-day offset ─────────────────────────────────────────────
+    # ── Resolve per-day base offset ────────────────────────────────────────
     # weekday(): 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
     dow   = now_ist().weekday()
     dow_names = {0:"Mon",1:"Tue",2:"Wed",3:"Thu",4:"Fri"}
-    off   = cfg.get("strike_offset_by_day",   {}).get(dow, cfg["strike_offset"])
-    hedge = cfg.get("hedge_width_by_day",      {}).get(dow, cfg["hedge_width"])
+    base_off   = cfg.get("strike_offset_by_day", {}).get(dow, cfg["strike_offset"])
+    base_hedge = cfg.get("hedge_width_by_day",   {}).get(dow, cfg["hedge_width"])
+    step       = cfg["strike_step"]
 
-    log_msg(f"{index_name} {dow_names.get(dow,'?')} offset: {off} pts | hedge: {hedge} pts")
+    # ── Apply gap multiplier (symmetric) ───────────────────────────────────
+    gap = get_gap_info(fyers, index_name, spot)
+    mult     = gap["multiplier"]
+    gap_type = gap["gap_type"]
 
-    # Persist today's active offset to STATE so dashboard can display it
+    adj_off   = base_off   * mult
+    adj_hedge = base_hedge * mult
+
+    # ── Asymmetric CE/PE split on directional gap days ──────────────────────
+    if USE_ASYMMETRIC_GAP:
+        asym = GAP_ASYMMETRY.get(gap_type, {"ce": 1.0, "pe": 1.0})
+        ce_off = round_to_step(adj_off * asym["ce"], step)
+        pe_off = round_to_step(adj_off * asym["pe"], step)
+    else:
+        ce_off = pe_off = round_to_step(adj_off, step)
+
+    hedge = round_to_step(adj_hedge, step)
+
+    log_msg(f"{index_name} {dow_names.get(dow,'?')} | gap {gap['gap_pct']:+.2f}% "
+            f"({gap_type}) ×{mult} | CE +{ce_off} PE −{pe_off} | hedge {hedge}")
+
+    # Persist active values to STATE so dashboard can display them
     with STATE_LOCK:
-        STATE["indices"][index_name]["active_offset"] = off
-        STATE["indices"][index_name]["active_hedge"]  = hedge
+        idx_state = STATE["indices"][index_name]
+        idx_state["active_offset"]    = max(ce_off, pe_off)  # show wider side
+        idx_state["active_ce_offset"] = ce_off
+        idx_state["active_pe_offset"] = pe_off
+        idx_state["active_hedge"]     = hedge
+        idx_state["gap_pct"]          = gap["gap_pct"]
+        idx_state["gap_type"]         = gap_type
+        idx_state["prev_close"]       = gap["prev_close"]
+        idx_state["today_open"]       = gap["today_open"]
 
-    ce_sym,  ce_k,  ce_ltp  = pick_leg(rows, "CE", spot + off)
-    pe_sym,  pe_k,  pe_ltp  = pick_leg(rows, "PE", spot - off)
-    hce_sym, hce_k, hce_ltp = pick_leg(rows, "CE", spot + off + hedge)
-    hpe_sym, hpe_k, hpe_ltp = pick_leg(rows, "PE", spot - off - hedge)
+    # short legs use asymmetric offsets; hedges sit a fixed width beyond each
+    ce_sym,  ce_k,  ce_ltp  = pick_leg(rows, "CE", spot + ce_off)
+    pe_sym,  pe_k,  pe_ltp  = pick_leg(rows, "PE", spot - pe_off)
+    hce_sym, hce_k, hce_ltp = pick_leg(rows, "CE", spot + ce_off + hedge)
+    hpe_sym, hpe_k, hpe_ltp = pick_leg(rows, "PE", spot - pe_off - hedge)
 
     lot = STATE["indices"][index_name]["lot_size"] or 0
     qty = lot * LOTS_PER_LEG * LOT_MULTIPLIER
     return [
         {"index": index_name, "symbol": hce_sym, "strike": hce_k,
          "side":  1, "qty": qty, "ref_ltp": hce_ltp, "role": "HEDGE-CE",
-         "offset": off},
+         "offset": ce_off},
         {"index": index_name, "symbol": hpe_sym, "strike": hpe_k,
          "side":  1, "qty": qty, "ref_ltp": hpe_ltp, "role": "HEDGE-PE",
-         "offset": off},
+         "offset": pe_off},
         {"index": index_name, "symbol": ce_sym,  "strike": ce_k,
          "side": -1, "qty": qty, "ref_ltp": ce_ltp,  "role": "SHORT-CE",
-         "offset": off},
+         "offset": ce_off},
         {"index": index_name, "symbol": pe_sym,  "strike": pe_k,
          "side": -1, "qty": qty, "ref_ltp": pe_ltp,  "role": "SHORT-PE",
-         "offset": off},
+         "offset": pe_off},
     ]
 
 

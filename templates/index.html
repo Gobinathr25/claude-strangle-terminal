@@ -370,7 +370,7 @@
               <th>ST&nbsp;Upper</th>
               <th>ST&nbsp;Lower</th>
               <th>Trend</th>
-              <th>Today's&nbsp;Offset</th>
+              <th>Offset&nbsp;/&nbsp;Gap</th>
               <th>Margin Req (SPAN+Exp)</th>
             </tr>
           </thead>
@@ -551,6 +551,10 @@ function updateScanner(scanner, ts) {
     const margin  = d.margin;
     const lot     = d.lot_size;
     const off     = d.active_offset;
+    const ceOff   = d.active_ce_offset;
+    const peOff   = d.active_pe_offset;
+    const gapType = d.gap_type;
+    const gapPct  = d.gap_pct;
 
     // Thursday = expiry day (weekday index 4 in JS = Thu, JS getDay() 4=Thu)
     const jsDay    = new Date().getDay(); // 0=Sun,1=Mon,...,4=Thu,5=Fri,6=Sat
@@ -577,10 +581,36 @@ function updateScanner(scanner, ts) {
     if (trend === 1)  trendHtml = '<span class="c-green bold">▲ UP</span>';
     if (trend === -1) trendHtml = '<span class="c-red bold">▼ DOWN</span>';
 
-    // offset cell — yellow + expiry label on Thursday
-    const offHtml = off != null
-      ? `<span style="color:${isExpiry ? 'var(--yellow)' : 'var(--cyan)'};font-weight:${isExpiry ? 'bold' : 'normal'}">±${off} pts</span>${isExpiry ? ' <span style="font-size:10px;color:var(--yellow)">(expiry)</span>' : ''}`
-      : '<span class="c-dim">--</span>';
+    // gap badge
+    const gapColors = {
+      'BIG_GAP_DOWN': 'var(--red)',
+      'GAP_DOWN':     'var(--red)',
+      'FLAT':         'var(--dim)',
+      'GAP_UP':       'var(--green)',
+      'BIG_GAP_UP':   'var(--green)',
+    };
+    const gapLabels = {
+      'BIG_GAP_DOWN': '▼▼ big gap dn',
+      'GAP_DOWN':     '▼ gap dn',
+      'FLAT':         '― flat',
+      'GAP_UP':       '▲ gap up',
+      'BIG_GAP_UP':   '▲▲ big gap up',
+    };
+
+    // offset cell — show asymmetric CE/PE if they differ, plus gap badge
+    let offHtml;
+    if (ceOff != null && peOff != null) {
+      const asym = ceOff !== peOff;
+      const offStr = asym
+        ? `<span style="color:var(--green)">CE +${ceOff}</span> / <span style="color:var(--red)">PE −${peOff}</span>`
+        : `<span style="color:${isExpiry ? 'var(--yellow)' : 'var(--cyan)'};font-weight:${isExpiry ? 'bold' : 'normal'}">±${ceOff} pts</span>`;
+      const gapBadge = gapType
+        ? `<br><span style="font-size:10px;color:${gapColors[gapType] || 'var(--dim)'}">${gapLabels[gapType] || gapType}${gapPct != null ? ` (${gapPct > 0 ? '+' : ''}${gapPct}%)` : ''}</span>`
+        : '';
+      offHtml = offStr + gapBadge;
+    } else {
+      offHtml = '<span class="c-dim">--</span>';
+    }
 
     // margin
     const marginHtml = margin !== null
@@ -595,7 +625,7 @@ function updateScanner(scanner, ts) {
         <td class="c-green">${fmt(upper)}</td>
         <td class="c-red">${fmt(lower)}</td>
         <td>${trendHtml}</td>
-        <td>${offHtml}</td>
+        <td style="font-size:11px">${offHtml}</td>
         <td>${marginHtml}</td>
       </tr>`;
   });
