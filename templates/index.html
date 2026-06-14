@@ -673,17 +673,32 @@ function escHtml(s) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Control
+// Control (Stop / Start buttons)
 // ═══════════════════════════════════════════════════════════════════════════
 function sendControl(action) {
+  const btn = document.getElementById(action === "stop" ? "btn-stop" : "btn-start");
+  if (btn) { btn.disabled = true; btn.textContent = "…"; }
+
   fetch("/api/control", {
-    method: "POST",
+    method:  "POST",
+    // Explicit Content-Type is mandatory — without it Flask's request.json
+    // returns None and the server returns a 400 error silently.
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action })
+    body:    JSON.stringify({ action }),
   })
-  .then(r => r.json())
-  .then(d => { if (!d.ok) alert("Error: " + d.error); })
-  .catch(e => alert("Network error: " + e));
+  .then(r => r.json().then(d => ({ ok: r.ok, ...d })))
+  .then(d => {
+    if (!d.ok) {
+      alert(`Control error: ${d.error || "Unknown error"}`);
+    }
+    // Button state will auto-update on next STATE push from SocketIO
+  })
+  .catch(e => {
+    alert(`Network error sending '${action}': ${e}`);
+  })
+  .finally(() => {
+    if (btn) { btn.disabled = false; }
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

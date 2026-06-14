@@ -96,7 +96,16 @@ import json
 import time
 import threading
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+# ── IST helper ───────────────────────────────────────────────────────────────
+# Railway free tier runs UTC with no TZ override available.
+# We convert explicitly: UTC + 5h 30m = IST.  No pytz / zoneinfo needed.
+_IST_OFFSET = timezone(timedelta(hours=5, minutes=30))
+
+def now_ist() -> datetime:
+    """Return current datetime in IST regardless of server timezone."""
+    return datetime.now(timezone.utc).astimezone(_IST_OFFSET)
 from collections import OrderedDict
 
 import requests
@@ -170,7 +179,7 @@ LOT_MULTIPLIER      = int(os.environ.get("LOT_MULTIPLIER", "1"))  # scale all le
 MARGIN_URL          = "https://api-t1.fyers.in/api/v3/multiorder/margin"
 
 # ── Market session timing (IST, 24-hr) ──────────────────────────────────────
-# All times are checked against datetime.now() which must be IST on the server.
+# All times are checked against now_ist() (IST) which must be IST on the server.
 # Railway servers run UTC — set TZ=Asia/Kolkata in Railway Variables.
 MARKET_OPEN   = (9,  15)   # 09:15 — earliest entry allowed
 NO_NEW_ROLLS  = (14, 45)   # 14:45 — stop opening new rolls after this
@@ -229,7 +238,7 @@ _stop_evt     = threading.Event()
 
 
 def log_msg(text: str) -> None:
-    ts = datetime.now().strftime("%H:%M:%S")
+    ts = now_ist().strftime("%H:%M:%S")
     with STATE_LOCK:
         STATE["messages"].append({"t": ts, "msg": text})
         STATE["messages"] = STATE["messages"][-50:]   # keep last 50 for log panel
@@ -246,7 +255,7 @@ def load_cached_token() -> str | None:
     try:
         with open(TOKEN_FILE) as fh:
             blob = json.load(fh)
-        if blob.get("date") == datetime.now().strftime("%Y-%m-%d"):
+        if blob.get("date") == now_ist().strftime("%Y-%m-%d"):
             return blob.get("access_token")
     except Exception:
         pass
@@ -256,7 +265,7 @@ def load_cached_token() -> str | None:
 def save_token(token: str) -> None:
     with open(TOKEN_FILE, "w") as fh:
         json.dump({"access_token": token,
-                   "date": datetime.now().strftime("%Y-%m-%d")}, fh)
+                   "date": now_ist().strftime("%Y-%m-%d")}, fh)
 
 
 def exchange_code_for_token(auth_code: str) -> str:
@@ -362,7 +371,7 @@ def compute_supertrend(df: pd.DataFrame,
 
 
 def fetch_history_df(fyers, symbol: str) -> pd.DataFrame:
-    rng_to   = datetime.now()
+    rng_to   = now_ist()
     rng_from = rng_to - timedelta(days=10)
     resp = fyers.history({
         "symbol":      symbol,
@@ -499,7 +508,7 @@ def execute_leg(fyers, leg: dict) -> dict:
         order_id = resp.get("id", "?")
 
     pos = {
-        "time":     datetime.now().strftime("%H:%M:%S"),
+        "time":     now_ist().strftime("%H:%M:%S"),
         "index":    leg["index"],
         "symbol":   leg["symbol"],
         "role":     leg["role"],
@@ -650,7 +659,7 @@ def get_market_phase() -> str:
     SQUARING_OFF— 14:55–15:34, auto square-off fires once then phase holds
     CLOSED      — 15:35 onwards, fully idle
     """
-    now  = datetime.now()
+    now  = now_ist()
     hhmm = (now.hour, now.minute)
 
     if hhmm < MARKET_OPEN:
@@ -854,8 +863,8 @@ def socketio_emitter(stop_evt: threading.Event) -> None:
                 "positions":      positions_out,
                 "total_mtm":      round(total_mtm, 2),
                 "messages":       messages_snap,
-                "ts":             datetime.now().strftime("%H:%M:%S"),
-                "date":           datetime.now().strftime("%a %d %b %Y"),
+                "ts":             now_ist().strftime("%H:%M:%S"),
+                "date":           now_ist().strftime("%a %d %b %Y"),
             }
 
             # ── emit inside an explicit app context ────────────────────────
@@ -1074,29 +1083,55 @@ def api_state():
 
 @app.route("/api/control", methods=["POST"])
 def api_control():
-    """Simple start/stop control endpoint."""
-    global _stop_evt
-    action = request.json.get("action", "")
+    """
+    Start / stop the strategy workers.
+    Accepts JSON body: {"action": "stop"} or {"action": "start"}
 
-    if action == "stop" and STATE["status"] == "RUNNING":
+    Hardened against missing Content-Type header (common browser quirk)
+    by using get_json(force=True, silent=True) which parses regardless
+    of Content-Type and returns None instead of raising on bad input.
+    """
+    global _stop_evt
+    data   = request.get_json(force=True, silent=True) or {}
+    action = data.get("action", "")
+
+    if not action:
+        return jsonify({"ok": False,
+                        "error": "Missing 'action' field in request body"}), 400
+
+    if action == "stop":
+        with STATE_LOCK:
+            current = STATE["status"]
+        if current != "RUNNING":
+            return jsonify({"ok": False,
+                            "error": f"Cannot stop — status is '{current}'"}), 400
         _stop_evt.set()
         with STATE_LOCK:
             STATE["status"] = "STOPPED"
-        log_msg("Strategy stopped by user")
+        log_msg("⏹ Strategy stopped by user")
         return jsonify({"ok": True, "status": "STOPPED"})
 
-    if action == "start" and STATE["status"] == "STOPPED":
-        # Re-use cached token to restart
+    if action == "start":
+        with STATE_LOCK:
+            current = STATE["status"]
+        if current not in ("STOPPED", "WAITING_AUTH"):
+            return jsonify({"ok": False,
+                            "error": f"Cannot start — status is '{current}'"}), 400
         token = load_cached_token()
         if not token:
-            return jsonify({"ok": False, "error": "Token expired, re-login"}), 400
-        fyers = build_fyers(token)
-        _stop_evt = threading.Event()
-        threading.Thread(target=boot_workers, args=(fyers, token),
-                         daemon=True, name="reboot").start()
-        return jsonify({"ok": True, "status": "RUNNING"})
+            return jsonify({"ok": False,
+                            "error": "Token expired — please log in again"}), 401
+        try:
+            fyers = build_fyers(token)
+            _stop_evt = threading.Event()
+            threading.Thread(target=boot_workers, args=(fyers, token),
+                             daemon=True, name="reboot").start()
+            return jsonify({"ok": True, "status": "BOOTING"})
+        except Exception as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
 
-    return jsonify({"ok": False, "error": f"Invalid action '{action}'"}), 400
+    return jsonify({"ok": False,
+                    "error": f"Unknown action '{action}'"}), 400
 
 
 # ============================================================================
