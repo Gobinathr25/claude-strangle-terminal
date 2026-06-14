@@ -215,8 +215,8 @@ INSTRUMENTS = {
         "exchange":      "NSE",
         "csv_url":       "https://public.fyers.in/sym_details/NSE_FO.csv",
         "underlying":    "NIFTY",
-        "strike_offset": 300,
-        "hedge_width":   300,
+        "strike_offset": 200,
+        "hedge_width":   600,
         "strike_step":   50,
     },
     "SENSEX": {
@@ -224,8 +224,8 @@ INSTRUMENTS = {
         "exchange":      "BSE",
         "csv_url":       "https://public.fyers.in/sym_details/BSE_FO.csv",
         "underlying":    "SENSEX",
-        "strike_offset": 800,
-        "hedge_width":   800,
+        "strike_offset": 600,
+        "hedge_width":   1200,
         "strike_step":   100,
     },
 }
