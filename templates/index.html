@@ -370,6 +370,7 @@
               <th>ST&nbsp;Upper</th>
               <th>ST&nbsp;Lower</th>
               <th>Trend</th>
+              <th>Today's&nbsp;Offset</th>
               <th>Margin Req (SPAN+Exp)</th>
             </tr>
           </thead>
@@ -549,6 +550,11 @@ function updateScanner(scanner, ts) {
     const trend   = d.st_trend;
     const margin  = d.margin;
     const lot     = d.lot_size;
+    const off     = d.active_offset;
+
+    // Thursday = expiry day (weekday index 4 in JS = Thu, JS getDay() 4=Thu)
+    const jsDay    = new Date().getDay(); // 0=Sun,1=Mon,...,4=Thu,5=Fri,6=Sat
+    const isExpiry = jsDay === 4;        // Thursday
 
     // spot colour
     let spotCls = "c-white";
@@ -571,6 +577,11 @@ function updateScanner(scanner, ts) {
     if (trend === 1)  trendHtml = '<span class="c-green bold">▲ UP</span>';
     if (trend === -1) trendHtml = '<span class="c-red bold">▼ DOWN</span>';
 
+    // offset cell — yellow + expiry label on Thursday
+    const offHtml = off != null
+      ? `<span style="color:${isExpiry ? 'var(--yellow)' : 'var(--cyan)'};font-weight:${isExpiry ? 'bold' : 'normal'}">±${off} pts</span>${isExpiry ? ' <span style="font-size:10px;color:var(--yellow)">(expiry)</span>' : ''}`
+      : '<span class="c-dim">--</span>';
+
     // margin
     const marginHtml = margin !== null
       ? `<span class="c-yellow">₹ ${fmt(margin, 0)}</span>`
@@ -584,6 +595,7 @@ function updateScanner(scanner, ts) {
         <td class="c-green">${fmt(upper)}</td>
         <td class="c-red">${fmt(lower)}</td>
         <td>${trendHtml}</td>
+        <td>${offHtml}</td>
         <td>${marginHtml}</td>
       </tr>`;
   });
