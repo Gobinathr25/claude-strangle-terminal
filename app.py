@@ -106,6 +106,68 @@ _IST_OFFSET = timezone(timedelta(hours=5, minutes=30))
 def now_ist() -> datetime:
     """Return current datetime in IST regardless of server timezone."""
     return datetime.now(timezone.utc).astimezone(_IST_OFFSET)
+
+
+# ── NSE / BSE Holiday Calendar ───────────────────────────────────────────────
+# Source: Official NSE circulars (verified via Zerodha MarketIntel, Jun 2026)
+# Both exchanges observe the same equity+F&O holidays.
+# Format: "YYYY-MM-DD"
+#
+# 2025 holidays — complete official list
+_NSE_HOLIDAYS_2025 = {
+    "2025-02-26",  # Mahashivratri
+    "2025-03-14",  # Holi
+    "2025-04-14",  # Dr. Baba Saheb Ambedkar Jayanti / Dr. B.R. Ambedkar Jayanti
+    "2025-04-18",  # Good Friday
+    "2025-05-01",  # Maharashtra Day
+    "2025-08-15",  # Independence Day
+    "2025-10-02",  # Mahatma Gandhi Jayanti
+    "2025-10-20",  # Diwali – Laxmi Pujan (Muhurat trading this evening)
+    "2025-10-21",  # Diwali – Balipratipada
+    "2025-11-05",  # Prakash Gurpurb Sri Guru Nanak Dev Ji
+    "2025-11-14",  # Gurunanak Jayanti (some sources show 5-Nov; keep both safe)
+    "2025-12-25",  # Christmas Day
+}
+
+# 2026 holidays — from NSE circular / Zerodha MarketIntel (verified 2026-06-14)
+_NSE_HOLIDAYS_2026 = {
+    "2026-01-15",  # Municipal Corporation Elections in Maharashtra
+    "2026-01-26",  # Republic Day
+    "2026-03-03",  # Holi
+    "2026-03-26",  # Shri Ram Navami
+    "2026-03-31",  # Shri Mahavir Jayanti
+    "2026-04-03",  # Good Friday
+    "2026-04-14",  # Dr. Baba Saheb Ambedkar Jayanti
+    "2026-05-01",  # Maharashtra Day
+    "2026-05-28",  # Bakri Eid (Id-Ul-Adha) — per Zerodha/NSE circular
+    "2026-06-26",  # Moharram
+    "2026-09-14",  # Ganesh Chaturthi
+    "2026-10-02",  # Mahatma Gandhi Jayanti
+    "2026-10-20",  # Dussehra
+    "2026-11-10",  # Diwali – Balipratipada
+    "2026-11-24",  # Prakash Gurpurb Sri Guru Nanak Dev Ji
+    "2026-12-25",  # Christmas Day
+}
+
+# Union of all known holidays
+_NSE_HOLIDAYS: set[str] = _NSE_HOLIDAYS_2025 | _NSE_HOLIDAYS_2026
+
+
+def is_trading_day(dt: datetime | None = None) -> bool:
+    """
+    Returns True if dt (IST datetime) is a valid NSE/BSE equity+F&O trading day.
+    Checks:
+      1. Weekday (Mon–Fri only; Sat/Sun → False)
+      2. Not in the NSE holiday calendar
+    If dt is None, uses now_ist().
+    """
+    if dt is None:
+        dt = now_ist()
+    # weekday(): 0=Mon … 4=Fri, 5=Sat, 6=Sun
+    if dt.weekday() >= 5:
+        return False
+    date_str = dt.strftime("%Y-%m-%d")
+    return date_str not in _NSE_HOLIDAYS
 from collections import OrderedDict
 
 import requests
@@ -138,10 +200,10 @@ from fyers_apiv3.FyersWebsocket import data_ws
 #   TZ             — MUST be "Asia/Kolkata" on Railway (server runs UTC)
 # ============================================================================
 
-CLIENT_ID    = os.environ.get("CLIENT_ID",    "SXTH7FSD35-100")
-SECRET_KEY   = os.environ.get("SECRET_KEY",   "LEOOR3FT7X")
-REDIRECT_URI = os.environ.get("REDIRECT_URI", "https://web-production-57689.up.railway.app/callback")
-FLASK_SECRET = os.environ.get("FLASK_SECRET", "xK9mP2qR8nL5vT3w")
+CLIENT_ID    = os.environ.get("CLIENT_ID",    "YOUR_CLIENT_ID-100")
+SECRET_KEY   = os.environ.get("SECRET_KEY",   "YOUR_SECRET_KEY")
+REDIRECT_URI = os.environ.get("REDIRECT_URI", "https://127.0.0.1/callback")
+FLASK_SECRET = os.environ.get("FLASK_SECRET", "change-this-to-a-random-string")
 TOKEN_FILE   = "fyers_access_token.json"
 
 PAPER_TRADING = os.environ.get("PAPER_TRADING", "true").lower() != "false"
@@ -650,26 +712,23 @@ def margin_worker(access_token: str, stop_evt: threading.Event) -> None:
 
 def get_market_phase() -> str:
     """
-    Returns the current market phase based on IST time.
-    Assumes the server clock is IST (set TZ=Asia/Kolkata on Railway).
+    Returns the current market phase based on IST time + trading day check.
 
-    PRE_OPEN    — before 09:15, strategy waits
+    HOLIDAY     — weekend or NSE declared holiday
+    PRE_OPEN    — before 09:15 on a trading day
     OPEN        — 09:15–14:44, normal entry + rolling allowed
-    NO_ROLLS    — 14:45–14:54, no new entries or rolls; existing positions held
-    SQUARING_OFF— 14:55–15:34, auto square-off fires once then phase holds
-    CLOSED      — 15:35 onwards, fully idle
+    NO_ROLLS    — 14:45–14:54, positions held, no new rolls
+    SQUARING_OFF— 14:55–15:34, auto square-off fires once
+    CLOSED      — 15:35 onwards on a trading day
     """
-    now  = now_ist()
+    now = now_ist()
+    if not is_trading_day(now):
+        return "HOLIDAY"
     hhmm = (now.hour, now.minute)
-
-    if hhmm < MARKET_OPEN:
-        return "PRE_OPEN"
-    if hhmm < NO_NEW_ROLLS:
-        return "OPEN"
-    if hhmm < SQUARE_OFF_AT:
-        return "NO_ROLLS"
-    if hhmm < MARKET_CLOSE:
-        return "SQUARING_OFF"
+    if   hhmm < MARKET_OPEN:   return "PRE_OPEN"
+    if   hhmm < NO_NEW_ROLLS:  return "OPEN"
+    if   hhmm < SQUARE_OFF_AT: return "NO_ROLLS"
+    if   hhmm < MARKET_CLOSE:  return "SQUARING_OFF"
     return "CLOSED"
 
 
@@ -710,15 +769,32 @@ def squareoff_all(fyers, reason: str = "EOD") -> None:
 
 def strategy_worker(fyers, access_token: str,
                     stream: TickStream, stop_evt: threading.Event) -> None:
-    breached = {name: None  for name in INSTRUMENTS}
-    entered  = {name: False for name in INSTRUMENTS}
+    breached     = {name: None  for name in INSTRUMENTS}
+    entered      = {name: False for name in INSTRUMENTS}
+    _last_date   = None    # track IST date to detect day rollover
 
     while not stop_evt.is_set():
+
+        # ── Day rollover: reset flags at start of each new IST date ───────
+        today = now_ist().strftime("%Y-%m-%d")
+        if today != _last_date:
+            if _last_date is not None:
+                log_msg(f"📅 New trading day {today} — resetting strategy state")
+            _last_date = today
+            entered  = {name: False for name in INSTRUMENTS}
+            breached = {name: None  for name in INSTRUMENTS}
+            with STATE_LOCK:
+                STATE["squaredoff"] = False
 
         # ── Update market phase in STATE so UI can display it ──────────────
         phase = get_market_phase()
         with STATE_LOCK:
             STATE["market_phase"] = phase
+
+        # ── HOLIDAY: weekend or NSE declared holiday ───────────────────────
+        if phase == "HOLIDAY":
+            stop_evt.wait(300)   # sleep 5 min — no point polling fast
+            continue
 
         # ── PRE_OPEN: wait silently until market opens ─────────────────────
         if phase == "PRE_OPEN":
